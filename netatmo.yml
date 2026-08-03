@@ -1,0 +1,74 @@
+name: netatmo-public-scrape
+
+on:
+  schedule:
+    # Every 10 minutes. GitHub queues scheduled runs on a best-effort basis and
+    # drops or delays them under load, so expect gaps -- see README.
+    - cron: "*/10 * * * *"
+  workflow_dispatch:
+    inputs:
+      tiles:
+        description: "Bounding-box grid, e.g. 1x1 or 3x3"
+        required: false
+        default: "3x3"
+
+permissions:
+  contents: write
+
+# Serialise runs: overlapping jobs would race on the refresh token and on push.
+concurrency:
+  group: netatmo-scrape
+  cancel-in-progress: false
+
+jobs:
+  scrape:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+
+      - name: Fetch Netatmo public data
+        env:
+          CLIENT_ID: ${{ secrets.CLIENT_ID }}
+          CLIENT_SECRET: ${{ secrets.CLIENT_SECRET }}
+          REFRESH_TOKEN: ${{ secrets.REFRESH_TOKEN }}
+          GH_PAT: ${{ secrets.GH_PAT }}
+        run: |
+          python fetch_netatmo.py \
+            --output-dir data \
+            --tiles "${{ github.event.inputs.tiles || '3x3' }}"
+
+      - name: Commit and push
+        run: |
+          set -euo pipefail
+          git config user.name  "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+
+          git add data
+          if git diff --cached --quiet; then
+            echo "No new data to commit."
+            exit 0
+          fi
+          git commit -m "data: netatmo $(date -u +'%Y-%m-%dT%H:%MZ')"
+
+          # Retry against concurrent pushes from the consolidation job.
+          for attempt in 1 2 3 4 5; do
+            if git pull --rebase --autostash origin "${GITHUB_REF_NAME}" && git push; then
+              echo "Pushed on attempt ${attempt}."
+              exit 0
+            fi
+            sleep $(( RANDOM % 10 + 5 ))
+          done
+          echo "::error::Failed to push after 5 attempts."
+          exit 1
