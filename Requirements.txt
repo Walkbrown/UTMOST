@@ -1,0 +1,4 @@
+pandas>=2.0
+pyarrow>=14.0
+requests>=2.31
+PyNaCl>=1.5
